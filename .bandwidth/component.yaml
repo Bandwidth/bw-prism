@@ -1,0 +1,19 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  schemaVersion: v1.0.0
+  name: bw-prism
+  description: Forked from https://github.com/stoplightio/prism
+  annotations:
+    github.com/project-slug: Bandwidth/bw-prism
+  organization: BW
+  costCenter: Development - CX-Accts & IdM
+  platformType: N/A
+  buildPlatform: GitHub Actions
+spec:
+  type: Utility
+  owner: github/band-cx
+  lifecycle: Prototype
+  dependsOn:
+    - resource:platform/GitHub Actions
+    - resource:cost-center/Development - CX-Accts & IdM
