@@ -3,9 +3,12 @@ on:
   push:
     branches:
     - master
+    tags:
+      - 'v*'
+  pull_request:
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.BW_RUNNER_GLORG_EKS_PROD_UBUNTU_2404_AMD64_S) }}
     container:
       image: node:18.20
     steps:
@@ -54,7 +57,8 @@ jobs:
     - name: Run Harness
       run: yarn test.harness
   harness-docker:
-    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    runs-on: ${{ fromJSON(vars.BW_RUNNER_GLORG_EKS_PROD_UBUNTU_2404_AMD64_S) }}
     container:
       image: node:18.20
     env:
@@ -80,46 +84,58 @@ jobs:
       run: yarn build.binary
     - name: Run Harness
       run: yarn test.harness
-  publish:
-    if: (github.ref == 'refs/tags/"v[0-9].[0-9]+.[0-9]+"') && (github.ref != 'refs/heads/master')
-    runs-on: ubuntu-latest
-    container:
-      image: node:18.20
+  publish-docker-dev:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ${{ fromJSON(vars.BW_RUNNER_GLORG_EKS_PROD_UBUNTU_2404_AMD64_S) }}
     needs:
     - build
-    - harness-macos
-    - harness-docker
     steps:
     - uses: actions/checkout@v4.1.0
-    - name: Set git identity
-      run: git config user.email "circle@circleci.com" && git config user.name "circleci"
-    - name: Install Dependencies
-      run: yarn --frozen-lockfile
-    - name: Build all code to JavaScript
-      run: yarn build
-    - run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> ~/.npmrc
-    - name: Publish
-      run: yarn lerna publish from-git --create-release=github --yes
-    - name: Create CLI binaries
-      run: npx pkg --out-path ./cli-binaries ./packages/cli/
-    - uses: actions/upload-artifact@v4.1.0
+    - name: Get Vault Tokens
+      uses: Bandwidth/vault-provider-action@v1
       with:
-        path: "./cli-binaries"
-    - uses: actions/upload-artifact@v4.1.0
+        artifactory-access-token-type: dev-writers
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Login to Docker registry
+      uses: docker/login-action@v3
       with:
-        path: ".//cli-binaries"
-  upload_artifacts:
-    if: (github.ref == 'refs/tags/"v[0-9].[0-9]+.[0-9]+"') && (github.ref != 'refs/heads/master')
-    runs-on: ubuntu-latest
-    container:
-      image: golang:1.23
-    needs:
-    - publish
+        registry: ${{ env.DEV_DOCKER_REGISTRY }}
+        username: ${{ env.ARTIFACTORY_ACCESS_TOKEN_USERNAME }}
+        password: ${{ env.ARTIFACTORY_ACCESS_TOKEN }}
+    - name: Get short SHA
+      id: sha
+      run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ env.DEV_DOCKER_REGISTRY }}/prism:${{ steps.sha.outputs.short }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+  setup:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ fromJSON(vars.BW_RUNNER_GLORG_EKS_PROD_UBUNTU_2404_AMD64_S) }}
+    outputs:
+      sha: ${{ steps.sha.outputs.short }}
+      version: ${{ steps.version.outputs.tag }}
     steps:
-    - uses: actions/download-artifact@v4.1.0
-      with:
-        path: "/tmp/"
-    - name: Download GitHub Release Utility
-      run: go install github.com/tcnksm/ghr@latest
-    - name: Publish Release artifacts on GitHub
-      run: ghr -t ${{github.token}} -u ${{ github.actor }} -r ${{ github.repository }} -c ${{ github.sha }} ${{ github.ref }} /tmp/cli-binaries
+    - uses: actions/checkout@v4.1.0
+    - name: Get short SHA
+      id: sha
+      run: echo "short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+    - name: Extract version from tag
+      id: version
+      run: echo "tag=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+  promote-docker-image-in-artifactory:
+    name: Promote Docker Images in Artifactory
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [ setup ]
+    uses: Bandwidth/artifact-promotion-workflow/.github/workflows/af-to-af-promotion.yml@v3
+    with:
+      artifactory-origin-repository: docker-local
+      artifactory-origin-docker-image-path-csv: prism
+      artifactory-origin-docker-image-tag: ${{ needs.setup.outputs.sha }}
+      artifactory-destination-repository: docker-local-prod
+      artifactory-destination-docker-image-tag: ${{ needs.setup.outputs.version }}
